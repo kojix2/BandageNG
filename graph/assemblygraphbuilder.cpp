@@ -216,6 +216,7 @@ static bool isStandardGFATag(const char name[2]) {
         case makeGFATag("KC"):
         case makeGFATag("FC"):
         case makeGFATag("RC"):
+        case makeGFATag("ka"):
         case makeGFATag("LB"):
         case makeGFATag("L2"):
         case makeGFATag("CB"):
@@ -418,6 +419,9 @@ namespace io {
             } else if (auto dpTag = gfa::getTag<float>("dp", record.tags)) {
                 graph.m_depthTag = "DP";
                 nodeDepth = *dpTag;
+            } else if (auto kaTag = gfa::getTag<float>("ka", record.tags)) {
+                graph.m_depthTag = "ka";
+                nodeDepth = *kaTag;
             } else if (auto kcTag = gfa::getTag<int64_t>("KC", record.tags)) {
                 graph.m_depthTag = "KC";
                 nodeDepth = double(*kcTag) / double(length);
