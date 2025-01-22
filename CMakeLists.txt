@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.28)
 project(BandageNG VERSION 2024.07 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -11,7 +11,6 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Svg Test Concurrent)
-find_package(ZLIB REQUIRED)
 
 set(LIB_SOURCES
     graphsearch/hit.cpp
@@ -27,6 +26,7 @@ set(LIB_SOURCES
     graph/debruijnedge.cpp
     graph/debruijnnode.cpp
     graph/graphicsitemedge.cpp
+    graph/graphicsitemlink.cpp
     graph/graphicsitemnode.cpp
     graph/graphlocation.cpp
     graph/path.cpp
@@ -92,7 +92,7 @@ set(CLI_SOURCES
     command_line/reduce.cpp
     command_line/settings.cpp)
 
-set(RESOURCES images/images.qrc images/application.icns)
+set(RESOURCES images/images.qrc images/application.icns images/application.rc)
 
 message(STATUS "Building Bandage-NG version ${PROJECT_VERSION}")
 add_compile_definitions(APP_VERSION="${PROJECT_VERSION}-dev")
@@ -122,14 +122,14 @@ target_link_libraries(BandageIo PRIVATE Qt6::Gui Qt6::Widgets foonathan::lexy)
 
 # FIXME: Untagle this
 add_library(BandageLib STATIC ${LIB_SOURCES} ${FORMS} graphsearch/graphsearchers.cpp)
-target_link_libraries(BandageLib PRIVATE BandageLayout BandageIo Qt6::Concurrent Qt6::Widgets Qt6::Svg ZLIB::ZLIB)
+target_link_libraries(BandageLib PRIVATE BandageLayout BandageIo llvmSupport Qt6::Concurrent Qt6::Widgets Qt6::Svg ${bandage_zlib})
 target_include_directories(BandageLib INTERFACE ".")
 
 add_library(BandageCLI STATIC ${CLI_SOURCES})
 target_link_libraries(BandageCLI PRIVATE BandageLib CLI11::CLI11 Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg)
 
 add_executable(BandageNG program/main.cpp ${RESOURCES})
-target_link_libraries(BandageNG BandageCLI BandageLib CLI11::CLI11 Qt6::Core Qt6::Widgets Qt6::Concurrent ZLIB::ZLIB)
+target_link_libraries(BandageNG BandageCLI BandageLib CLI11::CLI11 Qt6::Core Qt6::Widgets Qt6::Concurrent ${bandage_zlib})
 
 if (APPLE)
   set_target_properties(BandageNG PROPERTIES

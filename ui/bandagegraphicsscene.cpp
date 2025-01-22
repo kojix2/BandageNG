@@ -22,6 +22,7 @@
 #include "graph/debruijnedge.h"
 #include "graph/graphicsitemnode.h"
 #include "graph/graphicsitemedge.h"
+#include "graph/graphicsitemlink.h"
 #include "layout/graphlayout.h"
 #include "program/settings.h"
 
@@ -241,12 +242,14 @@ void BandageGraphicsScene::addGraphicsItemsToScene(AssemblyGraph &graph,
 
     // Then make the GraphicsItemEdge objects and add them to the scene first,
     // so they are drawn underneath
-    for (auto &entry : graph.m_deBruijnGraphEdges) {
-        DeBruijnEdge * edge = entry.second;
+    for (DeBruijnEdge *edge : graph.m_deBruijnGraphEdges) {
         if (!edge->isDrawn())
             continue;
 
-        auto * graphicsItemEdge = new GraphicsItemEdge(edge);
+        auto *graphicsItemEdge =
+                edge->getOverlapType() == EdgeOverlapType::EXTRA_LINK ?
+                new GraphicsItemLink(edge, graph) :
+                new GraphicsItemEdge(edge, graph);
         edge->setGraphicsItemEdge(graphicsItemEdge);
         graphicsItemEdge->setFlag(QGraphicsItem::ItemIsSelectable);
         addItem(graphicsItemEdge);
@@ -350,7 +353,8 @@ void BandageGraphicsScene::removeGraphicsItemNodes(const std::unordered_set<Grap
     blockSignals(false);
 }
 
-void BandageGraphicsScene::duplicateGraphicsNode(DeBruijnNode * originalNode, DeBruijnNode * newNode) {
+void BandageGraphicsScene::duplicateGraphicsNode(DeBruijnNode *originalNode, DeBruijnNode *newNode,
+                                                 const AssemblyGraph &graph) {
     GraphicsItemNode * originalGraphicsItemNode = originalNode->getGraphicsItemNode();
     if (originalGraphicsItemNode == nullptr)
         return;
@@ -368,7 +372,7 @@ void BandageGraphicsScene::duplicateGraphicsNode(DeBruijnNode * originalNode, De
     addItem(newGraphicsItemNode);
 
     for (auto *newEdge : newNode->edges()) {
-        auto * graphicsItemEdge = new GraphicsItemEdge(newEdge);
+        auto * graphicsItemEdge = new GraphicsItemEdge(newEdge, graph);
         graphicsItemEdge->setZValue(-1.0);
         newEdge->setGraphicsItemEdge(graphicsItemEdge);
         graphicsItemEdge->setFlag(QGraphicsItem::ItemIsSelectable);

@@ -17,15 +17,21 @@
 
 #pragma once
 
+#include "io/cigar.h"
+
+#include "llvm/Support/Error.h"
+
 #include <QString>
 #include <memory>
+#include <vector>
 
 class AssemblyGraph;
+class DeBruijnEdge;
 
 namespace io {
     class AssemblyGraphBuilder {
     public:
-        virtual bool build(AssemblyGraph &graph) = 0;
+        virtual llvm::Error build(AssemblyGraph &graph) = 0;
         virtual ~AssemblyGraphBuilder() = default;
 
         static std::unique_ptr<AssemblyGraphBuilder> get(const QString &fullFileName);
@@ -33,6 +39,8 @@ namespace io {
         [[nodiscard]] bool hasCustomLabels() const { return hasCustomLabels_; }
         [[nodiscard]] bool hasCustomColours() const { return hasCustomColours_; }
         [[nodiscard]] bool hasComplexOverlaps() const { return hasComplexOverlaps_; }
+
+        void treatJumpsAsLinks(bool val = true) { jumpsAsLinks_ = val; }
 
     protected:
         explicit AssemblyGraphBuilder(QString fileName)
@@ -42,9 +50,19 @@ namespace io {
         bool hasCustomLabels_ = false;
         bool hasCustomColours_ = false;
         bool hasComplexOverlaps_ = false;
+        bool jumpsAsLinks_ = false;
     };
 
+    bool handleStandardGFAEdgeTags(const DeBruijnEdge *edgePtr,
+                                   const DeBruijnEdge *rcEdgePtr,
+                                   const std::vector<cigar::tag> &tags,
+                                   AssemblyGraph &graph);
+
     bool loadGFAPaths(AssemblyGraph &graph, QString fileName);
+    bool loadGFALinks(AssemblyGraph &graph, QString fileName,
+                      std::vector<DeBruijnEdge*> *newEdges = nullptr);
+    bool loadLinks(AssemblyGraph &graph, QString fileName,
+                   std::vector<DeBruijnEdge*> *newEdges = nullptr);
     bool loadGAFPaths(AssemblyGraph &graph, QString fileName);
     bool loadSPAlignerPaths(AssemblyGraph &graph, QString fileName);
     bool loadSPAdesPaths(AssemblyGraph &graph, QString fileName);

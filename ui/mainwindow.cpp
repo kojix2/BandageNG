@@ -40,6 +40,7 @@
 #include "graph/debruijnedge.h"
 #include "graph/graphicsitemnode.h"
 #include "graph/graphicsitemedge.h"
+#include "graph/graphicsitemlink.h"
 #include "graph/path.h"
 #include "graph/sequenceutils.h"
 #include "graph/io.h"
@@ -139,6 +140,7 @@ MainWindow::MainWindow(QString fileToLoadOnStartup, bool drawGraphAfterLoad) :
     connect(ui->actionLoad_CSV, SIGNAL(triggered(bool)), this, SLOT(loadCSV()));
     connect(ui->actionLoad_layout, SIGNAL(triggered()), this, SLOT(loadGraphLayout()));
     connect(ui->actionLoad_paths, SIGNAL(triggered()), this, SLOT(loadGraphPaths()));
+    connect(ui->actionLoad_links, SIGNAL(triggered()), this, SLOT(loadGraphLinks()));
     connect(ui->actionExit, SIGNAL(triggered()), this, SLOT(close()));
     connect(ui->graphScopeComboBox, SIGNAL(currentIndexChanged(int)), this, SLOT(graphScopeChanged()));
     connect(ui->zoomSpinBox, SIGNAL(valueChanged(double)), this, SLOT(zoomSpinBoxChanged()));
@@ -339,6 +341,7 @@ void MainWindow::loadGraph(QString fullFileName) {
                              "Cannot load file. The selected file's format was not recognised as any supported graph type.");
         return;
     }
+    builder->treatJumpsAsLinks(g_settings->jumpsAsLinks);
 
     resetScene();
     cleanUp();
@@ -348,67 +351,57 @@ void MainWindow::loadGraph(QString fullFileName) {
     progress->setWindowModality(Qt::WindowModal);
     progress->show();
 
-    auto *watcher = new QFutureWatcher<bool>;
+    auto *watcher = new QFutureWatcher<llvm::Error>;
     connect(watcher, &QFutureWatcher<bool>::finished,
-            this, [=]() {
-        try {
-            // Note that this will rethrow the exceptions, if any
-            bool loaded = watcher->result();
-            if (builder->hasComplexOverlaps())
-                QMessageBox::warning(this, "Unsupported CIGAR",
-                                     "This GFA file contains "
-                                     "links with complex CIGAR strings (containing "
-                                     "operators other than M).\n\n"
-                                     "Bandage does not support edge overlaps that are not "
-                                     "perfect, so the behaviour of such edges in this graph "
-                                     "is undefined.");
+            this,
+            [=]() {
+                if (auto E = watcher->future().takeResult()) {
+                    QString errorTitle = "Error loading graph";
+                    QString errorMessage = "There was an error when attempting to load\n"
+                                           + fullFileName + ":\n"
+                                           + QString::fromStdString(llvm::toString(std::move(E))) + "\n\n"
+                                           + "Please verify that this file has the correct format.";
+                    QMessageBox::warning(this, errorTitle, errorMessage);
+                    resetScene();
+                    cleanUp();
+                    clearGraphDetails();
+                    setUiState(NO_GRAPH_LOADED);
+                    return;
+                }
 
-            setUiState(GRAPH_LOADED);
-            setWindowTitle("BandageNG - " + fullFileName);
+                if (builder->hasComplexOverlaps())
+                    QMessageBox::warning(this, "Unsupported CIGAR",
+                                         "This GFA file contains "
+                                         "links with complex CIGAR strings (containing "
+                                         "operators other than M).\n\n"
+                                         "Bandage does not support edge overlaps that are not "
+                                         "perfect, so the behaviour of such edges in this graph "
+                                         "is undefined.");
 
-            g_assemblyGraph->determineGraphInfo();
-            displayGraphDetails();
-            g_memory->rememberedPath = QFileInfo(fullFileName).absolutePath();
-            g_memory->clearGraphSpecificMemory();
+                setUiState(GRAPH_LOADED);
+                setWindowTitle("BandageNG - " + fullFileName);
 
-            bool customColours = builder->hasCustomColours(),
-                    customLabels = builder->hasCustomLabels();
+                g_assemblyGraph->determineGraphInfo();
+                displayGraphDetails();
+                g_memory->rememberedPath = QFileInfo(fullFileName).absolutePath();
+                g_memory->clearGraphSpecificMemory();
 
-            // If the graph has custom colours, automatically switch the colour scheme to custom colours.
-            if (customColours)
-                switchColourScheme(CUSTOM_COLOURS);
+                bool customColours = builder->hasCustomColours(),
+                      customLabels = builder->hasCustomLabels();
 
-            // If the graph doesn't have custom colours, but the colour scheme is on 'Custom', automatically switch it back
-            // to the default of 'Random colours'.
-            if (!customColours && ui->coloursComboBox->currentIndex() == 6)
-                ui->coloursComboBox->setCurrentIndex(0);
+                // If the graph has custom colours, automatically switch the colour scheme to custom colours.
+                if (customColours)
+                    switchColourScheme(CUSTOM_COLOURS);
 
-            setupPathSelectionLineEdit(ui->pathSelectionLineEdit);
-            setupPathSelectionLineEdit(ui->pathSelectionLineEdit2);
-            setupWalkSelectionLineEdit(ui->walkSelectionLineEdit);
-            setupWalkSelectionLineEdit(ui->walkSelectionLineEdit2);
-        }  catch (const AssemblyGraphError &err) {
-            QString errorTitle = "Error loading graph";
-            QString errorMessage = "There was an error when attempting to load\n"
-                                   + fullFileName + ":\n"
-                                   + err.what() + "\n\n"
-                                   + "Please verify that this file has the correct format.";
-            QMessageBox::warning(this, errorTitle, errorMessage);
-            resetScene();
-            cleanUp();
-            clearGraphDetails();
-            setUiState(NO_GRAPH_LOADED);
-        } catch (...) {
-            QString errorTitle = "Error loading graph";
-            QString errorMessage = "There was an error when attempting to load:\n"
-                                   + fullFileName + "\n\n"
-                                   + "Please verify that this file has the correct format.";
-            QMessageBox::warning(this, errorTitle, errorMessage);
-            resetScene();
-            cleanUp();
-            clearGraphDetails();
-            setUiState(NO_GRAPH_LOADED);
-        }
+                // If the graph doesn't have custom colours, but the colour scheme is on 'Custom', automatically switch it back
+                // to the default of 'Random colours'.
+                if (!customColours && ui->coloursComboBox->currentIndex() == 6)
+                    ui->coloursComboBox->setCurrentIndex(0);
+
+                setupPathSelectionLineEdit(ui->pathSelectionLineEdit);
+                setupPathSelectionLineEdit(ui->pathSelectionLineEdit2);
+                setupWalkSelectionLineEdit(ui->walkSelectionLineEdit);
+                setupWalkSelectionLineEdit(ui->walkSelectionLineEdit2);
     });
     connect(watcher, SIGNAL(finished()), progress, SLOT(deleteLater()));
     connect(watcher, SIGNAL(finished()), watcher, SLOT(deleteLater()));
@@ -477,6 +470,67 @@ void MainWindow::loadGraphPaths(QString fullFileName) {
     displayGraphDetails();
     setupPathSelectionLineEdit(ui->pathSelectionLineEdit);
     setupPathSelectionLineEdit(ui->pathSelectionLineEdit2);
+}
+
+void MainWindow::loadGraphLinks(QString fullFileName) {
+    QString selectedFilter = "Links in tab-separated format (*.tsv)";
+    if (fullFileName.isEmpty())
+        fullFileName = QFileDialog::getOpenFileName(this, "Load additional links", "",
+                                                    "Links in tab-separated format (*.tsv);;GFA links (*.gfa)",
+                                                    &selectedFilter);
+
+    if (fullFileName.isEmpty())
+        return; // user clicked on cancel
+
+    std::vector<DeBruijnEdge*> newEdges;
+    try {
+        if (selectedFilter == "Links in tab-separated format (*.tsv)")
+            io::loadLinks(*g_assemblyGraph, fullFileName, &newEdges);
+        if (selectedFilter == "GFA links (*.gfa)")
+            io::loadGFALinks(*g_assemblyGraph, fullFileName, &newEdges);
+    } catch (std::exception &e) {
+        QString errorTitle = "Error loading graph links";
+        QString errorMessage = "There was an error when attempting to load:\n"
+                               + fullFileName + ":\n"
+                               + e.what() + "\n\n"
+                               + "Please verify that this file has the correct format.";
+        QMessageBox::warning(this, errorTitle, errorMessage);
+        return;
+    }
+
+    // FIXME: ugly!
+    g_assemblyGraph->determineGraphInfo();
+    displayGraphDetails();
+
+    if (m_uiState == GRAPH_LOADED)
+        return;
+
+    // Now we need to iterate over new edges and add them to scene
+    m_scene->blockSignals(true);
+    for (DeBruijnEdge *edge : newEdges) {
+        edge->determineIfDrawn();
+        if (!edge->isDrawn())
+            continue;
+
+        auto *graphicsItemEdge =
+                edge->getOverlapType() == EdgeOverlapType::EXTRA_LINK ?
+                new GraphicsItemLink(edge, *g_assemblyGraph) :
+                new GraphicsItemEdge(edge, *g_assemblyGraph);
+
+        graphicsItemEdge->setZValue(-1.0);
+        edge->setGraphicsItemEdge(graphicsItemEdge);
+        graphicsItemEdge->setFlag(QGraphicsItem::ItemIsSelectable);
+        m_scene->addItem(graphicsItemEdge);
+    }
+    m_scene->blockSignals(false);
+
+    m_scene->setSceneRectangle();
+    zoomToFitScene();
+    g_graphicsView->viewport()->update();
+    selectionChanged();
+
+    // Move the focus to the view so the user can use keyboard controls to navigate.
+    g_graphicsView->setFocus();
 }
 
 void MainWindow::displayGraphDetails()
@@ -616,19 +670,36 @@ QString MainWindow::getSelectedEdgeListText()
     std::sort(selectedEdges.begin(), selectedEdges.end(), DeBruijnEdge::compareEdgePointers);
 
     QString edgeText;
-    for (size_t i = 0; i < selectedEdges.size(); ++i)
-    {
-        edgeText += selectedEdges[i]->getStartingNode()->getName();
+    for (size_t i = 0; i < selectedEdges.size(); ++i) {
+        const auto *edge = selectedEdges[i];
+        edgeText += edge->getStartingNode()->getName();
         edgeText += " to ";
-        edgeText += selectedEdges[i]->getEndingNode()->getName();
-        int overlap = selectedEdges[i]->getOverlap();
-        if (selectedEdges[i]->getOverlapType() != EdgeOverlapType::JUMP)
-            edgeText += QString(" (%1bp)").arg(overlap);
-        else {
-            edgeText += " (jump link" +
-                        (overlap ? QString(" %1bp)").arg(overlap)
-                                 : ")");
+        edgeText += edge->getEndingNode()->getName();
+        int overlap = edge->getOverlap();
+
+        switch (edge->getOverlapType()) {
+            case EdgeOverlapType::EXTRA_LINK: {
+                edgeText += " (link";
+                auto tags = g_assemblyGraph->m_edgeTags.find(edge);
+                if (tags != g_assemblyGraph->m_edgeTags.end()) {
+                    if (auto wt = gfa::getTag<float>("WT", tags->second))
+                        edgeText += QString(", weight: %1").arg(*wt);
+                    if (auto wt = gfa::getTag<int64_t>("WT", tags->second))
+                        edgeText += QString(", weight: %1").arg(*wt);
+                }
+
+                edgeText += ")";
+                break;
+            }
+            case EdgeOverlapType::JUMP:
+                edgeText += " (jump link" +
+                            (overlap ? QString(" %1bp)").arg(overlap)
+                             : ")");
+                break;
+            default:
+                edgeText += QString(" (%1bp)").arg(overlap);
         }
+
         if (i != selectedEdges.size() - 1)
             edgeText += ", ";
     }
@@ -997,7 +1068,7 @@ void MainWindow::resetScene() {
 
 std::vector<DeBruijnNode *> MainWindow::getNodesFromLineEdit(QLineEdit * lineEdit, bool exactMatch, std::vector<QString> * nodesNotInGraph)
 {
-    return g_assemblyGraph->getNodesFromString(lineEdit->text(), exactMatch, nodesNotInGraph);
+    return g_assemblyGraph->getNodesFromStringList(lineEdit->text(), exactMatch, nodesNotInGraph);
 }
 
 
@@ -1943,6 +2014,7 @@ void MainWindow::setUiState(UiState uiState)
         ui->actionLoad_CSV->setEnabled(false);
         ui->actionLoad_layout->setEnabled(false);
         ui->actionLoad_paths->setEnabled(false);
+        ui->actionLoad_links->setEnabled(false);
         ui->actionExport_layout->setEnabled(false);
         break;
     case GRAPH_LOADED:
@@ -1953,10 +2025,11 @@ void MainWindow::setUiState(UiState uiState)
         ui->blastSearchWidget->setEnabled(true);
         ui->bedWidget->setEnabled(true);
         ui->annotationSelectorWidget->setEnabled(true);
-        ui->selectionScrollAreaWidgetContents->setEnabled(false);
+        ui->selectionScrollAreaWidgetContents->setEnabled(true);
         ui->actionLoad_CSV->setEnabled(true);
         ui->actionLoad_layout->setEnabled(true);
         ui->actionLoad_paths->setEnabled(true);
+        ui->actionLoad_links->setEnabled(true);
         ui->actionExport_layout->setEnabled(false);
         break;
     case GRAPH_DRAWN:
@@ -1972,6 +2045,7 @@ void MainWindow::setUiState(UiState uiState)
         ui->actionLoad_CSV->setEnabled(true);
         ui->actionLoad_layout->setEnabled(true);
         ui->actionLoad_paths->setEnabled(true);
+        ui->actionLoad_links->setEnabled(true);
         ui->actionExport_layout->setEnabled(true);
         break;
     }

@@ -26,6 +26,7 @@
 #include "io/fileutils.h"
 
 #include "seq/sequence.hpp"
+#include <llvm/Support/Error.h>
 
 #include <QFileInfo>
 #include <QFile>
@@ -35,6 +36,11 @@
 #include <memory>
 
 #include <zlib.h>
+
+#if defined(_MSC_VER)
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
 
 static bool checkFirstLineOfFile(const QString& fullFileName, const QString& regExp) {
     QFile inputFile(fullFileName);
@@ -124,7 +130,18 @@ static ssize_t gzgetdelim(char **buf, size_t *bufsiz, int delimiter, gzFile fp) 
 }
 
 static ssize_t gzgetline(char **buf, size_t *bufsiz, gzFile fp) {
-    return gzgetdelim(buf, bufsiz, '\n', fp);
+    ssize_t read = gzgetdelim(buf, bufsiz, '\n', fp);
+    // Very big hammer to handle CRLF line endings: if the last symbol of a line
+    // is CR, then replace it with 0
+    if (read >= 2) {
+        char *last = *buf + read - 2;
+        if (*last == '\r') {
+            *last = '\0';
+            read -= 1;
+        }
+    }
+
+    return read;
 }
 
 
@@ -187,32 +204,111 @@ static bool attemptToLoadSequencesFromFasta(AssemblyGraph &graph) {
     return atLeastOneNodeSequenceLoaded;
 }
 
+static constexpr unsigned makeGFATag(const char name[2]) {
+    return (unsigned) name[0] << 8 | name[1];
+}
+
+static bool isStandardGFATag(const char name[2]) {
+    switch (makeGFATag(name)) {
+        case makeGFATag("dp"):
+        case makeGFATag("DP"):
+        case makeGFATag("LN"):
+        case makeGFATag("KC"):
+        case makeGFATag("FC"):
+        case makeGFATag("RC"):
+        case makeGFATag("ka"):
+        case makeGFATag("rd"):
+        case makeGFATag("LB"):
+        case makeGFATag("L2"):
+        case makeGFATag("CB"):
+        case makeGFATag("C2"):
+            return true;
+    }
+
+    return false;
+}
+
+
+template<class Container, class Key>
+static void maybeAddGFATags(Key k, Container &c,
+                            const std::vector<gfa::tag> &tags,
+                            bool ignoreStandard = true) {
+    bool tagsInserted = false;
+    for (const auto &tag: tags) {
+        if (ignoreStandard && isStandardGFATag(tag.name))
+            continue;
+        c[k].push_back(tag);
+        tagsInserted = true;
+    }
+
+    if (tagsInserted)
+        c[k].shrink_to_fit();
+}
+
+template<class Entity>
+static bool maybeAddCustomColor(const Entity *e,
+                                const std::vector<gfa::tag> &tags,
+                                const char *tag,
+                                AssemblyGraph &graph) {
+    if (auto cb = gfa::getTag<std::string>(tag, tags)) {
+        graph.setCustomColour(e, cb->c_str());
+        return true;
+    }
+
+    return false;
+}
+
 namespace io {
+    bool handleStandardGFAEdgeTags(const DeBruijnEdge *edgePtr,
+                                   const DeBruijnEdge *rcEdgePtr,
+                                   const std::vector<gfa::tag> &tags,
+                                   AssemblyGraph &graph) {
+        bool hasCustomColours = false;
+        hasCustomColours |= maybeAddCustomColor(edgePtr, tags, "CB", graph);
+        hasCustomColours |= maybeAddCustomColor(rcEdgePtr, tags, "C2", graph);
+
+        if (auto wd = gfa::getTag<float>("WD", tags)) {
+            graph.setCustomStyle(edgePtr, *wd);
+            graph.setCustomStyle(rcEdgePtr, *wd);
+        } else if (auto wd = gfa::getTag<int64_t>("WD", tags)) {
+            graph.setCustomStyle(edgePtr, *wd);
+            graph.setCustomStyle(rcEdgePtr, *wd);
+        }
+
+        if (auto ps = gfa::getTag<int64_t>("PS", tags)) {
+            graph.setCustomStyle(edgePtr, Qt::PenStyle(*ps));
+            graph.setCustomStyle(rcEdgePtr, Qt::PenStyle(*ps));
+        }
+
+        maybeAddGFATags(edgePtr, graph.m_edgeTags, tags, false);
+        if (rcEdgePtr)
+            maybeAddGFATags(rcEdgePtr, graph.m_edgeTags, tags, false);
+
+        return hasCustomColours;
+    }
+
+    std::pair<bool, bool> handleStandardGFANodeTags(const DeBruijnNode *nodePtr,
+                                                    const DeBruijnNode *rcNodePtr,
+                                                    const std::vector<gfa::tag> &tags,
+                                                    AssemblyGraph &graph) {
+        bool hasCustomColours = false, hasCustomLabels = false;
+        hasCustomColours |= maybeAddCustomColor(nodePtr, tags, "CB", graph);
+        hasCustomColours |= maybeAddCustomColor(rcNodePtr, tags, "C2", graph);
+
+        auto lb = gfa::getTag<std::string>("LB", tags);
+        auto l2 = gfa::getTag<std::string>("L2", tags);
+        hasCustomLabels = lb || l2;
+        if (lb) graph.setCustomLabel(nodePtr, lb->c_str());
+        if (l2) graph.setCustomLabel(rcNodePtr, l2->c_str());
+
+        maybeAddGFATags(nodePtr, graph.m_nodeTags, tags);
+        maybeAddGFATags(rcNodePtr, graph.m_nodeTags, tags);
+
+        return { hasCustomColours, hasCustomLabels };
+    }
+
     class GFAAssemblyGraphBuilder : public AssemblyGraphBuilder {
-    private:
-        static constexpr unsigned makeTag(const char name[2]) {
-            return (unsigned) name[0] << 8 | name[1];
-        }
-
-        static bool isStandardTag(const char name[2]) {
-            switch (makeTag(name)) {
-                case makeTag("dp"):
-                case makeTag("DP"):
-                case makeTag("LN"):
-                case makeTag("KC"):
-                case makeTag("FC"):
-                case makeTag("RC"):
-                case makeTag("LB"):
-                case makeTag("L2"):
-                case makeTag("CB"):
-                case makeTag("C2"):
-                    return true;
-            }
-
-            return false;
-        }
-
-
+      private:
         static DeBruijnNode *maybeAddSegment(const std::string &nodeName,
                                              double nodeDepth, Sequence sequence,
                                              AssemblyGraph &graph) {
@@ -233,7 +329,9 @@ namespace io {
             return (graph.m_deBruijnGraphNodes[nodeName] = new DeBruijnNode(nodeName.c_str(), nodeDepth, sequence));
         }
 
-        static auto
+        using NodePair = std::pair<DeBruijnNode*, DeBruijnNode*>;
+
+        static llvm::Expected<NodePair>
         addSegmentPair(const std::string &nodeName,
                        double nodeDepth, Sequence sequence,
                        AssemblyGraph &graph) {
@@ -241,17 +339,41 @@ namespace io {
 
             auto *nodePtr = maybeAddSegment(nodeName, nodeDepth, sequence, graph);
             if (!nodePtr)
-                throw AssemblyGraphError("Duplicate segment named: " + nodeName);
+                return llvm::createStringError("Duplicate segment named: " + nodeName);
 
-            auto oppositeNodePtr =
-                    maybeAddSegment(getOppositeNodeName(nodeName), nodeDepth, sequence.GetReverseComplement(), graph);
-            if (!oppositeNodePtr)
-                throw AssemblyGraphError("Duplicate segment named: " + oppositeNodeName);
+            // Handle self-rc nodes. We record the same node under different names
+            DeBruijnNode *oppositeNodePtr = nullptr;
+            auto rcSeq = sequence.GetReverseComplement();
+            if (!sequence.empty() && !sequence.missing() && sequence == rcSeq) {
+                // We might already have opposite node recorded (e.g. a placeholder).
+                // If yes, we'd need to transfer the edges
+                auto [oppositeNodeStorage, inserted] = graph.m_deBruijnGraphNodes.insert(oppositeNodeName, nodePtr);
+                if (!inserted) {
+                    oppositeNodePtr = *oppositeNodeStorage;
+
+                    for (auto *edge : oppositeNodePtr->edges()) {
+                        if (edge->getEndingNode() == oppositeNodePtr)
+                            edge->setEndingNode(nodePtr);
+                        if (edge->getStartingNode() == oppositeNodePtr)
+                            edge->setStartingNode(nodePtr);
+                        nodePtr->addEdge(edge);
+                    }
+
+                    *oppositeNodeStorage = nodePtr;
+                }
+
+                oppositeNodePtr = nodePtr;
+            } else {
+                oppositeNodePtr =
+                    maybeAddSegment(getOppositeNodeName(nodeName), nodeDepth, rcSeq, graph);
+                if (!oppositeNodePtr)
+                    return llvm::createStringError("Duplicate segment named: " + oppositeNodeName);
+            }
 
             nodePtr->setReverseComplement(oppositeNodePtr);
             oppositeNodePtr->setReverseComplement(nodePtr);
 
-            return std::make_pair(nodePtr, oppositeNodePtr);
+            return std::pair{nodePtr, oppositeNodePtr};
         }
 
         // Add placeholder
@@ -261,37 +383,8 @@ namespace io {
             return addSegmentPair(nodeName, 0, Sequence(), graph);
         }
 
-        template<class Container, class Key>
-        static void maybeAddTags(Key k, Container &c,
-                                 const std::vector<gfa::tag> &tags,
-                                 bool ignoreStandard = true) {
-            bool tagsInserted = false;
-            for (const auto &tag: tags) {
-                if (ignoreStandard && isStandardTag(tag.name))
-                    continue;
-                c[k].push_back(tag);
-                tagsInserted = true;
-            }
-
-            if (tagsInserted)
-                c[k].shrink_to_fit();
-        }
-
-        template<class Entity>
-        static bool maybeAddCustomColor(const Entity *e,
-                                        const std::vector<gfa::tag> &tags,
-                                        const char *tag,
-                                        AssemblyGraph &graph) {
-            if (auto cb = gfa::getTag<std::string>(tag, tags)) {
-                graph.setCustomColour(e, cb->c_str());
-                return true;
-            }
-
-            return false;
-        }
-
-        bool handleSegment(const gfa::segment &record,
-                           AssemblyGraph &graph) {
+        llvm::Expected<bool> handleSegment(const gfa::segment &record,
+                                           AssemblyGraph &graph) {
             bool sequencesAreMissing = false;
 
             std::string nodeName{record.name};
@@ -327,6 +420,12 @@ namespace io {
             } else if (auto dpTag = gfa::getTag<float>("dp", record.tags)) {
                 graph.m_depthTag = "DP";
                 nodeDepth = *dpTag;
+            } else if (auto kaTag = gfa::getTag<float>("ka", record.tags)) {
+                graph.m_depthTag = "ka";
+                nodeDepth = *kaTag;
+            } else if (auto rdTag = gfa::getTag<int64_t>("rd", record.tags)) {
+                graph.m_depthTag = "rd";
+                nodeDepth = *rdTag + 1;
             } else if (auto kcTag = gfa::getTag<int64_t>("KC", record.tags)) {
                 graph.m_depthTag = "KC";
                 nodeDepth = double(*kcTag) / double(length);
@@ -339,55 +438,59 @@ namespace io {
             }
 
             // FIXME: get rid of copies and QString's
-            auto [nodePtr, oppositeNodePtr] = addSegmentPair(nodeName, nodeDepth, sequence, graph);
+            auto nodePairOrErr = addSegmentPair(nodeName, nodeDepth, sequence, graph);
+            if (!nodePairOrErr)
+                return nodePairOrErr.takeError();
 
-            auto lb = gfa::getTag<std::string>("LB", record.tags);
-            auto l2 = gfa::getTag<std::string>("L2", record.tags);
-            hasCustomLabels_ = hasCustomLabels_ || lb || l2;
-            if (lb) graph.setCustomLabel(nodePtr, lb->c_str());
-            if (l2) graph.setCustomLabel(oppositeNodePtr, l2->c_str());
+            auto [nodePtr, oppositeNodePtr] = nodePairOrErr.get();
 
-            hasCustomColours_ |= maybeAddCustomColor(nodePtr, record.tags, "CB", graph);
-            hasCustomColours_ |= maybeAddCustomColor(oppositeNodePtr, record.tags, "C2", graph);
-
-            maybeAddTags(nodePtr, graph.m_nodeTags, record.tags);
-            maybeAddTags(oppositeNodePtr, graph.m_nodeTags, record.tags);
+            auto [hasCustomColors, hasCustomLabels] =
+                    handleStandardGFANodeTags(nodePtr, oppositeNodePtr, record.tags, graph);
+            hasCustomColours_ |= hasCustomColors;
+            hasCustomLabels_ |= hasCustomLabels;
 
             return sequencesAreMissing;
         }
 
-        static DeBruijnNode *getNode(const std::string &name,
-                                     AssemblyGraph &graph) {
+        static llvm::Expected<DeBruijnNode*> getNode(const std::string &name,
+                                                     AssemblyGraph &graph) {
             auto nodeIt = graph.m_deBruijnGraphNodes.find(name);
             if (nodeIt != graph.m_deBruijnGraphNodes.end())
                 return *nodeIt;
 
             // Add placeholder
-            DeBruijnNode *nodePtr, *oppositeNodePtr;
-            std::tie(nodePtr, oppositeNodePtr) = addSegmentPair(name, graph);
+            auto nodePairOrErr = addSegmentPair(name, graph);
+            if (!nodePairOrErr)
+                return nodePairOrErr.takeError();
 
-            return nodePtr;
+            return nodePairOrErr.get().first;
         }
 
-        auto addLink(const std::string &fromNode,
-                     const std::string &toNode,
-                     const std::vector<gfa::tag> &tags,
-                     AssemblyGraph &graph) {
+        using EdgePair = std::pair<DeBruijnEdge*, DeBruijnEdge*>;
+
+        llvm::Expected<EdgePair> addLink(const std::string &fromNode,
+                                         const std::string &toNode,
+                                         const std::vector<gfa::tag> &tags,
+                                         AssemblyGraph &graph) {
             // Get source / dest nodes (or create placeholders to fill in)
-            DeBruijnNode *fromNodePtr = getNode(fromNode, graph);
-            DeBruijnNode *toNodePtr = getNode(toNode, graph);
+            DeBruijnNode *fromNodePtr, *toNodePtr;
+
+            if (auto nodeOrErr = getNode(fromNode, graph))
+                fromNodePtr = *nodeOrErr;
+            else
+                return nodeOrErr.takeError();
+
+            if (auto nodeOrErr = getNode(toNode, graph))
+                toNodePtr = *nodeOrErr;
+            else
+                return nodeOrErr.takeError();
 
             DeBruijnEdge *edgePtr = nullptr, *rcEdgePtr = nullptr;
-
-            // Ignore dups, hifiasm seems to create them
-            if (graph.m_deBruijnGraphEdges.count({fromNodePtr, toNodePtr}))
-                return std::make_pair(edgePtr, rcEdgePtr);
-
             edgePtr = new DeBruijnEdge(fromNodePtr, toNodePtr);
 
             bool isOwnPair = fromNodePtr == toNodePtr->getReverseComplement() &&
                              toNodePtr == fromNodePtr->getReverseComplement();
-            graph.m_deBruijnGraphEdges[{fromNodePtr, toNodePtr}] = edgePtr;
+            graph.m_deBruijnGraphEdges.emplace(edgePtr);
             fromNodePtr->addEdge(edgePtr);
             toNodePtr->addEdge(edgePtr);
 
@@ -401,45 +504,30 @@ namespace io {
                 rcToNodePtr->addEdge(rcEdgePtr);
                 edgePtr->setReverseComplement(rcEdgePtr);
                 rcEdgePtr->setReverseComplement(edgePtr);
-                graph.m_deBruijnGraphEdges[{rcToNodePtr, rcFromNodePtr}] = rcEdgePtr;
+                graph.m_deBruijnGraphEdges.emplace(rcEdgePtr);
             }
 
-            hasCustomColours_ |= maybeAddCustomColor(edgePtr, tags, "CB", graph);
-            hasCustomColours_ |= maybeAddCustomColor(rcEdgePtr, tags, "C2", graph);
+            hasCustomColours_ |=
+                    handleStandardGFAEdgeTags(edgePtr, rcEdgePtr, tags, graph);
 
-            if (auto wd = gfa::getTag<float>("WD", tags)) {
-                graph.setCustomStyle(edgePtr, *wd);
-                graph.setCustomStyle(rcEdgePtr, *wd);
-            } else if (auto wd = gfa::getTag<int64_t>("WD", tags)) {
-                graph.setCustomStyle(edgePtr, *wd);
-                graph.setCustomStyle(rcEdgePtr, *wd);
-            }
-
-            if (auto ps = gfa::getTag<int64_t>("PS", tags)) {
-                graph.setCustomStyle(edgePtr, Qt::PenStyle(*ps));
-                graph.setCustomStyle(rcEdgePtr, Qt::PenStyle(*ps));
-            }
-
-            maybeAddTags(edgePtr, graph.m_edgeTags, tags,
-                         false);
-            if (rcEdgePtr)
-                maybeAddTags(rcEdgePtr, graph.m_edgeTags, tags,
-                             false);
-
-            return std::make_pair(edgePtr, rcEdgePtr);
+            return std::pair{edgePtr, rcEdgePtr};
         }
 
-        void handleLink(const gfa::link &record,
-                        AssemblyGraph &graph) {
+        llvm::Error handleLink(const gfa::link &record,
+                               AssemblyGraph &graph) {
             std::string fromNode{record.lhs};
             fromNode.push_back(record.lhs_revcomp ? '-' : '+');
             std::string toNode{record.rhs};
             toNode.push_back(record.rhs_revcomp ? '-' : '+');
 
-            auto [edgePtr, rcEdgePtr] =
-                    addLink(fromNode, toNode, record.tags, graph);
+            DeBruijnEdge *edgePtr, *rcEdgePtr;
+            if (auto edgePairOrErr = addLink(fromNode, toNode, record.tags, graph)) {
+                std::tie(edgePtr, rcEdgePtr) = *edgePairOrErr;
+            } else
+                return edgePairOrErr.takeError();
+
             if (!edgePtr)
-                return;
+                return llvm::Error::success();
 
             const auto &overlap = record.overlap;
             size_t overlapLength = 0;
@@ -456,57 +544,72 @@ namespace io {
                 rcEdgePtr->setOverlap(edgePtr->getOverlap());
                 rcEdgePtr->setOverlapType(edgePtr->getOverlapType());
             }
+
+            return llvm::Error::success();
         }
 
-        void handleGapLink(const gfa::gaplink &record,
-                           AssemblyGraph &graph) {
+        llvm::Error handleGapLink(const gfa::gaplink &record,
+                                  AssemblyGraph &graph,
+                                  bool isLink = false) {
             // FIXME: get rid of severe duplication!
             std::string fromNode{record.lhs};
             fromNode.push_back(record.lhs_revcomp ? '-' : '+');
             std::string toNode{record.rhs};
             toNode.push_back(record.rhs_revcomp ? '-' : '+');
 
-            auto [edgePtr, rcEdgePtr] =
-                    addLink(fromNode, toNode, record.tags, graph);
-            if (!edgePtr)
-                return;
+            DeBruijnEdge *edgePtr, *rcEdgePtr;
+            if (auto edgePairOrErr = addLink(fromNode, toNode, record.tags, graph)) {
+                std::tie(edgePtr, rcEdgePtr) = *edgePairOrErr;
+            } else
+                return edgePairOrErr.takeError();
 
             edgePtr->setOverlap(record.distance == std::numeric_limits<int64_t>::min() ? 0 : record.distance);
-            edgePtr->setOverlapType(JUMP);
+            edgePtr->setOverlapType(isLink ? EdgeOverlapType::EXTRA_LINK : EdgeOverlapType::JUMP);
             if (rcEdgePtr) {
                 rcEdgePtr->setOverlap(edgePtr->getOverlap());
                 rcEdgePtr->setOverlapType(edgePtr->getOverlapType());
             }
 
             if (!graph.hasCustomColour(edgePtr))
-                graph.setCustomColour(edgePtr, "red");
+                graph.setCustomColour(edgePtr, isLink ? "green" : "red");
             if (!graph.hasCustomColour(rcEdgePtr))
-                graph.setCustomColour(rcEdgePtr, "red");
+                graph.setCustomColour(rcEdgePtr, isLink ? "green" : "red");
             if (!graph.hasCustomStyle(edgePtr))
-                graph.setCustomStyle(edgePtr, Qt::DashLine);
+                graph.setCustomStyle(edgePtr, isLink ? Qt::DotLine : Qt::DashLine);
             if (!graph.hasCustomStyle(rcEdgePtr))
-                graph.setCustomStyle(rcEdgePtr, Qt::DashLine);
+                graph.setCustomStyle(rcEdgePtr, isLink ? Qt::DotLine :Qt::DashLine);
+
+            return llvm::Error::success();
         }
 
-        void handlePath(const gfa::path &record,
-                        AssemblyGraph &graph) {
+        llvm::Error handlePath(const gfa::path &record,
+                               AssemblyGraph &graph) {
             std::vector<DeBruijnNode *> pathNodes;
             pathNodes.reserve(record.segments.size());
 
-            for (const auto &node: record.segments)
-                pathNodes.push_back(graph.m_deBruijnGraphNodes.at(node));
+            for (const auto &node: record.segments) {
+                auto nodeIt = graph.m_deBruijnGraphNodes.find(node);
+                if (nodeIt == graph.m_deBruijnGraphNodes.end())
+                    return llvm::createStringError(llvm::Twine("malformed path string for path '")
+                                               + record.name + "', invalid node in path: " + node);
+
+                pathNodes.push_back(nodeIt.value());
+            }
             Path p(Path::makeFromOrderedNodes(pathNodes, false));
             if (p.nodes().size() != pathNodes.size()) {
                 // We were unable to build path through the graph, likely the input
                 // file is invalid
-                throw AssemblyGraphError(std::string("malformed path string, cannot reconstruct path through the graph"));
+                return llvm::createStringError(llvm::Twine("malformed path string for path '")
+                                               + record.name + "', cannot reconstruct path through the graph");
             }
 
             graph.m_deBruijnGraphPaths.emplace(record.name, std::move(p));
+
+            return llvm::Error::success();
         }
 
-        void handleWalk(const gfa::walk &record,
-                        AssemblyGraph &graph) {
+        llvm::Error handleWalk(const gfa::walk &record,
+                               AssemblyGraph &graph) {
             std::vector<DeBruijnNode *> walkNodes;
             walkNodes.reserve(record.Walk.size());
 
@@ -520,16 +623,22 @@ namespace io {
                 else if (orientation == '<')
                     nodeName.push_back('-');
                 else
-                    throw AssemblyGraphError(std::string("invalid walk string: ").append(node));
+                    return llvm::createStringError(llvm::Twine("invalid walk string: ") + node);
 
-                walkNodes.push_back(graph.m_deBruijnGraphNodes.at(nodeName));
+                auto nodeIt = graph.m_deBruijnGraphNodes.find(nodeName);
+                if (nodeIt == graph.m_deBruijnGraphNodes.end())
+                    return llvm::createStringError(llvm::Twine("malformed path string for walk '")
+                                               + record.SeqId + "', invalid node in path: " + node);
+
+                walkNodes.push_back(nodeIt.value());
             }
 
             Path p(Path::makeFromOrderedNodes(walkNodes, false));
             if (p.nodes().size() != walkNodes.size()) {
                 // We were unable to build path through the graph, likely the input
                 // file is invalid
-                throw AssemblyGraphError(std::string("malformed walk string, cannot reconstruct walk through the graph"));
+                return llvm::createStringError(llvm::Twine("malformed walk string for walk '")
+                                               + record.SeqId + "', cannot reconstruct path through the graph");
             }
 
             unsigned len = p.getLength();
@@ -540,12 +649,14 @@ namespace io {
                                                Walk{std::string(record.SampleId),
                                                    seqStart, seqEnd, record.HapIndex,
                                                    std::move(p)});
+
+            return llvm::Error::success();
         }
 
     public:
         using AssemblyGraphBuilder::AssemblyGraphBuilder;
 
-        bool build(AssemblyGraph &graph) override {
+        llvm::Error build(AssemblyGraph &graph) override {
             graph.m_filename = fileName_;
 
             bool sequencesAreMissing = false;
@@ -553,7 +664,7 @@ namespace io {
             std::unique_ptr<std::remove_pointer<gzFile>::type, decltype(&gzclose)>
                     fp(gzopen(fileName_.toStdString().c_str(), "r"), gzclose);
             if (!fp)
-                throw AssemblyGraphError("failed to open file: " + fileName_.toStdString());
+                return llvm::createStringError("failed to open file: " + fileName_.toStdString());
 
             size_t i = 0;
             char *line = nullptr;
@@ -567,28 +678,39 @@ namespace io {
                 if (!result)
                     continue;
 
-                std::visit([&](const auto &record) {
+                llvm::Error E =
+                        std::visit([&](const auto &record) {
                                using T = std::decay_t<decltype(record)>;
                                if constexpr (std::is_same_v<T, gfa::segment>) {
-                                   sequencesAreMissing |= handleSegment(record, graph);
+                                   if (auto valueOrError = handleSegment(record, graph))
+                                       sequencesAreMissing |= *valueOrError;
+                                   else
+                                       return valueOrError.takeError();
                                } else if constexpr (std::is_same_v<T, gfa::link>) {
-                                   handleLink(record, graph);
+                                   if (auto E = handleLink(record, graph))
+                                       return E;
                                } else if constexpr (std::is_same_v<T, gfa::gaplink>) {
-                                   handleGapLink(record, graph);
+                                   if (auto E = handleGapLink(record, graph, jumpsAsLinks_))
+                                       return E;
                                } else if constexpr (std::is_same_v<T, gfa::path>) {
-                                   handlePath(record, graph);
+                                   if (auto E = handlePath(record, graph))
+                                       return E;
                                } else if constexpr (std::is_same_v<T, gfa::walk>) {
-                                   handleWalk(record, graph);
+                                   if (auto E = handleWalk(record, graph))
+                                       return E;
                                }
+                               return llvm::Error(llvm::Error::success());
                            },
                            *result);
+                if (E)
+                    return E;
             }
 
             graph.m_sequencesLoadedFromFasta = NOT_TRIED;
             if (sequencesAreMissing)
                 attemptToLoadSequencesFromFasta(graph);
 
-            return true;
+            return llvm::Error::success();
         }
     };
 
@@ -637,7 +759,7 @@ namespace io {
             return name;
         }
 
-        bool build(AssemblyGraph &graph) override {
+        llvm::Error build(AssemblyGraph &graph) override {
             graph.m_filename = fileName_;
             graph.m_depthTag = "";
 
@@ -702,7 +824,7 @@ namespace io {
                     circularNodeNames.push_back(name);
 
                 if (name.length() < 1)
-                    throw "load error";
+                    return llvm::createStringError("load error");
 
                 auto node = new DeBruijnNode(name, depth, sequence);
                 graph.m_deBruijnGraphNodes.emplace(name.toStdString(), node);
@@ -715,14 +837,14 @@ namespace io {
                 graph.createDeBruijnEdge(circularNodeName, circularNodeName, 0, EXACT_OVERLAP);
             }
 
-            return true;
+            return llvm::Error::success();
         }
     };
 
     class FastgAssemblyGraphBuilder : public AssemblyGraphBuilder {
         using AssemblyGraphBuilder::AssemblyGraphBuilder;
 
-        bool build(AssemblyGraph &graph) override {
+        llvm::Error build(AssemblyGraph &graph) override {
             graph.m_filename = fileName_;
             graph.m_depthTag = "KC";
 
@@ -758,7 +880,7 @@ namespace io {
                         QStringList thisNodeDetails = thisNode.split("_");
 
                         if (thisNodeDetails.size() < 6)
-                            throw "load error";
+                            return llvm::createStringError("load error");
 
                         nodeName = thisNodeDetails.at(1);
                         if (negativeNode)
@@ -766,7 +888,7 @@ namespace io {
                         else
                             nodeName += "+";
                         if (graph.m_deBruijnGraphNodes.count(nodeName.toStdString()))
-                            throw "load error";
+                            return llvm::createStringError("load error");
 
                         QString nodeDepthString = thisNodeDetails.at(5);
                         if (negativeNode) {
@@ -797,7 +919,7 @@ namespace io {
                             QStringList edgeNodeDetails = edgeNode.split("_");
 
                             if (edgeNodeDetails.size() < 2)
-                                throw "load error";
+                                return llvm::createStringError("load error");
 
                             QString edgeNodeName = edgeNodeDetails.at(1);
                             if (negativeNode)
@@ -849,9 +971,9 @@ namespace io {
             graph.autoDetermineAllEdgesExactOverlap();
 
             if (graph.m_deBruijnGraphNodes.empty())
-                throw "load error";
+                return llvm::createStringError("load error");
 
-            return true;
+            return llvm::Error::success();
         }
     };
 
@@ -863,7 +985,7 @@ namespace io {
     class AsqgAssemblyGraphBuilder : public AssemblyGraphBuilder {
         using AssemblyGraphBuilder::AssemblyGraphBuilder;
 
-        bool build(AssemblyGraph &graph) override {
+        llvm::Error build(AssemblyGraph &graph) override {
             graph.m_filename = fileName_;
             graph.m_depthTag = "";
 
@@ -886,7 +1008,7 @@ namespace io {
                     // Lines beginning with "VT" are sequence (node) lines
                     if (lineParts.at(0) == "VT") {
                         if (lineParts.size() < 3)
-                            throw "load error";
+                            return llvm::createStringError("load error");
 
                         // We treat all nodes in this file as positive nodes and add "+" to the end of their names.
                         QString nodeName = lineParts.at(1);
@@ -909,11 +1031,11 @@ namespace io {
                         // Instead, we save the starting and ending nodes and make the edges after
                         // we're done looking at the file.
                         if (lineParts.size() < 2)
-                            throw "load error";
+                            return llvm::createStringError("load error");
 
                         QStringList edgeParts = lineParts[1].split(" ");
                         if (edgeParts.size() < 8)
-                            throw "load error";
+                            return llvm::createStringError("load error");
 
                         QString s1Name = edgeParts.at(0);
                         QString s2Name = edgeParts.at(1);
@@ -986,16 +1108,19 @@ namespace io {
             }
 
             if (graph.m_deBruijnGraphNodes.empty())
-                throw "load error";
+                return llvm::createStringError("load error");
 
-            return badEdgeCount == 0;
+            if (badEdgeCount)
+                return llvm::createStringError("load error");
+
+            return llvm::Error::success();
         }
     };
 
     class TrinityAssemblyGraphBuilder : public AssemblyGraphBuilder {
         using AssemblyGraphBuilder::AssemblyGraphBuilder;
 
-        bool build(AssemblyGraph &graph) override {
+        llvm::Error build(AssemblyGraph &graph) override {
             graph.m_filename = fileName_;
             graph.m_depthTag = "";
 
@@ -1023,13 +1148,13 @@ namespace io {
                 //or "TRINITY_GG", "TR" or "GG", then that will be trimmed off.
 
                 if (name.length() < 4)
-                    throw "load error";
+                    return llvm::createStringError("load error");
 
                 int componentStartIndex = name.indexOf(QRegularExpression("c\\d+_"));
                 int componentEndIndex = name.indexOf("_", componentStartIndex);
 
                 if (componentStartIndex < 0 || componentEndIndex < 0)
-                    throw "load error";
+                    return llvm::createStringError("load error");
 
                 QString component = name.left(componentEndIndex);
                 if (component.startsWith("TRINITY_DN") || component.startsWith("TRINITY_GG"))
@@ -1038,16 +1163,16 @@ namespace io {
                     component = component.remove(0, 2);
 
                 if (component.length() < 2)
-                    throw "load error";
+                    return llvm::createStringError("load error");
 
                 int pathStartIndex = name.indexOf("path=[") + 6;
                 int pathEndIndex = name.indexOf("]", pathStartIndex);
                 if (pathStartIndex < 0 || pathEndIndex < 0)
-                    throw "load error";
+                    return llvm::createStringError("load error");
                 int pathLength = pathEndIndex - pathStartIndex;
                 QString path = name.mid(pathStartIndex, pathLength);
                 if (path.size() == 0)
-                    throw "load error";
+                    return llvm::createStringError("load error");
 
                 QStringList pathParts = path.split(" ");
 
@@ -1057,7 +1182,7 @@ namespace io {
                     const QString &pathPart = pathParts.at(i);
                     QStringList nodeParts = pathPart.split(":");
                     if (nodeParts.size() < 2)
-                        throw "load error";
+                        return llvm::createStringError("load error");
 
                     //Most node numbers will be formatted simply as the number, but some
                     //(I don't know why) have '@' and the start and '@!' at the end.  In
@@ -1074,7 +1199,7 @@ namespace io {
                         QStringList nodeRangeParts = nodeRange.split("-");
 
                         if (nodeRangeParts.size() < 2)
-                            throw "load error";
+                            return llvm::createStringError("load error");
 
                         int nodeRangeStart = nodeRangeParts.at(0).toInt();
                         int nodeRangeEnd = nodeRangeParts.at(1).toInt();
@@ -1120,9 +1245,9 @@ namespace io {
             graph.setAllEdgesExactOverlap(0);
 
             if (graph.m_deBruijnGraphNodes.empty())
-                throw "load error";
+                return llvm::createStringError("load error");
 
-            return true;
+            return llvm::Error::success();
         }
     };
 

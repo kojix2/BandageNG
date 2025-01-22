@@ -66,11 +66,10 @@ public:
     //Nodes are stored in a map with a key of the node's name.
     tsl::htrie_map<char, DeBruijnNode*> m_deBruijnGraphNodes;
 
-    using DeBruijnLink = QPair<DeBruijnNode*, DeBruijnNode*>;
+    using DeBruijnLink = std::pair<DeBruijnNode*, DeBruijnNode*>;
 
-    // Edges are stored in a map with a key of the starting and ending node
-    // pointers.
-    phmap::parallel_flat_hash_map<DeBruijnLink, DeBruijnEdge*> m_deBruijnGraphEdges;
+    // Edges are stored in a set for fast removal
+    phmap::parallel_flat_hash_set<DeBruijnEdge*> m_deBruijnGraphEdges;
 
     // Custom colors
     phmap::parallel_flat_hash_map<const DeBruijnNode*, QColor> m_nodeColors;
@@ -138,11 +137,13 @@ public:
     bool loadCSV(const QString& filename, QStringList * columns, QString * errormsg, bool * coloursLoaded);
 
     static bool checkIfStringHasNodes(QString nodesString);
-    static QString generateNodesNotFoundErrorMessage(std::vector<QString> nodesNotInGraph,
-                                              bool exact);
-    std::vector<DeBruijnNode *> getNodesFromString(QString nodeNamesString,
-                                                   bool exactMatch,
-                                                   std::vector<QString> * nodesNotInGraph = nullptr) const;
+    static QString generateNodesNotFoundErrorMessage(const std::vector<QString> &nodesNotInGraph,
+                                                     bool exact);
+    std::pair<DeBruijnNode*, DeBruijnNode*> getNodes(const QString &nodeName) const;
+
+    std::vector<DeBruijnNode *> getNodesFromStringList(QString nodeNamesString,
+                                                       bool exactMatch,
+                                                       std::vector<QString> * nodesNotInGraph = nullptr) const;
 
     void setAllEdgesExactOverlap(int overlap);
     void autoDetermineAllEdgesExactOverlap();
@@ -195,7 +196,6 @@ public:
 
     QColor getCustomColourForDisplay(const DeBruijnNode *node) const;
     QStringList getCustomLabelForDisplay(const DeBruijnNode *node) const;
-
 
     QString getUniqueNodeName(QString baseName) const;
     QString getNodeNameFromString(QString string) const;

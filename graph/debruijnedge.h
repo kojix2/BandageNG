@@ -23,18 +23,36 @@
 class GraphicsItemEdge;
 
 enum EdgeOverlapType {
-    UNKNOWN_OVERLAP, EXACT_OVERLAP,
-    AUTO_DETERMINED_EXACT_OVERLAP, JUMP};
+    UNKNOWN_OVERLAP,
+    EXACT_OVERLAP,
+    AUTO_DETERMINED_EXACT_OVERLAP,
+    JUMP,
+    EXTRA_LINK
+};
 
 class DeBruijnEdge
 {
-    static constexpr unsigned OVERLAP_BITS = 29;
+    static constexpr unsigned OVERLAP_BITS = 28;
+
+    DeBruijnNode * m_startingNode;
+    DeBruijnNode * m_endingNode;
+    GraphicsItemEdge * m_graphicsItemEdge;
+    DeBruijnEdge * m_reverseComplement;
+
+    bool m_drawn : 1;
+    EdgeOverlapType m_overlapType : 3;
+    int m_overlap : OVERLAP_BITS;
+    // We are having 4 bytes here for now due to alignment requirements
+
 public:
     //CREATORS
     DeBruijnEdge(DeBruijnNode * startingNode, DeBruijnNode * endingNode);
 
     DeBruijnNode * getStartingNode() const {return m_startingNode;}
     DeBruijnNode * getEndingNode() const {return m_endingNode;}
+    void setStartingNode(DeBruijnNode *node) { m_startingNode = node;}
+    void setEndingNode(DeBruijnNode *node) { m_endingNode = node;}
+
     GraphicsItemEdge * getGraphicsItemEdge() const {return m_graphicsItemEdge;}
     DeBruijnEdge * getReverseComplement() const {return m_reverseComplement;}
     bool isDrawn() const {return m_drawn;}
@@ -71,14 +89,6 @@ public:
     void autoDetermineExactOverlap();
 
 private:
-    DeBruijnNode * m_startingNode;
-    DeBruijnNode * m_endingNode;
-    GraphicsItemEdge * m_graphicsItemEdge;
-    DeBruijnEdge * m_reverseComplement;
-    bool m_drawn : 1;
-    EdgeOverlapType m_overlapType : 2;
-    int m_overlap : OVERLAP_BITS;
-
     bool edgeIsVisible() const;
     static unsigned timesNodeInPath(const DeBruijnNode * node, const std::vector<DeBruijnNode *> &path);
     static std::vector<DeBruijnEdge *> findNextEdgesInPath(DeBruijnNode * nextNode,

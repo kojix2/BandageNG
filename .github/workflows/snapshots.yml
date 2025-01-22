@@ -20,12 +20,15 @@ jobs:
 
     steps:
       - id: commit
-        uses: pr-mpt/actions-commit-hash@v2
+        uses: pr-mpt/actions-commit-hash@v3
 
       - name: '🧰 Checkout'
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: '⚙️ Grab cmake & ninja'
+        uses: lukka/get-cmake@latest
 
       - name: '⚙️ Install Qt'
         uses: jurplel/install-qt-action@v3
@@ -38,14 +41,14 @@ jobs:
         run: sudo apt-get install -y appstream
 
       - name: '⚙️ Configure CMake'
-        run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=/usr
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=/usr -G Ninja
 
       - name: '🚧 Build'
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} -j8
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
       - name: '⚙️ Make AppDir'
         working-directory: ${{github.workspace}}/build
-        run: make install DESTDIR=AppDir
+        run: DESTDIR=AppDir cmake --install ${{github.workspace}}/build
 
       - name: '⚙️ Install Linuxdeploy'
         working-directory: ${{github.workspace}}/build
@@ -64,7 +67,7 @@ jobs:
         shell: bash
 
       - name: '📤 Upload artifact: AppImage'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: BandageNG-Linux-${{steps.commit.outputs.short}}.AppImage
           path: ${{github.workspace}}/build/BandageNG*.AppImage
@@ -74,12 +77,15 @@ jobs:
     name: '🍎 macOS'
     steps:
       - id: commit
-        uses: pr-mpt/actions-commit-hash@v2
+        uses: pr-mpt/actions-commit-hash@v3
 
       - name: '🧰 Checkout'
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: '⚙️ Grab cmake & ninja'
+        uses: lukka/get-cmake@latest
 
       - name: '⚙️ Install Qt'
         uses: jurplel/install-qt-action@v3
@@ -89,10 +95,10 @@ jobs:
           version: ${{env.QT_VERSION}}
 
       - name: '⚙️ Configure CMake'
-        run:  cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_INSTALL_PREFIX=/usr
+        run:  cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_INSTALL_PREFIX=/usr -G Ninja
 
       - name: '🚧 Build'
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} -j8
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
       - name: '📦 Make DMG'
         working-directory: ${{github.workspace}}/build
@@ -101,29 +107,30 @@ jobs:
           mv *.dmg BandageNG-macOS-${{steps.commit.outputs.short}}.dmg
 
       - name: '📤 Upload artifact: DMG'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: BandageNG-macOS-${{steps.commit.outputs.short}}.dmg
           path: ${{github.workspace}}/build/BandageNG*.dmg
 
   build-windows:
-    if: ${{ false }}  # disable for now
     runs-on: windows-latest
     name: '🧊 Windows'
     steps:
       - id: commit
-        uses: pr-mpt/actions-commit-hash@v2
+        uses: pr-mpt/actions-commit-hash@v3
 
       - name: '🧰 Checkout'
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: '⚙️ Grab cmake & ninja'
+        uses: lukka/get-cmake@latest
 
       - name: '⚙️ Configure MSVC'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-          spectre: true
 
       - name: '⚙️ Install Qt'
         uses: jurplel/install-qt-action@v3
@@ -133,10 +140,24 @@ jobs:
           version: ${{env.QT_VERSION}}
 
       - name: '⚙️ Configure CMake'
-        run:  cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=/usr
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=/usr -G Ninja
 
       - name: '🚧 Build'
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} -j8
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+
+      - name: '📦 Make package'
+        working-directory: ${{github.workspace}}/build
+        run: |
+          mkdir BandageNG
+          cp BandageNG.exe BandageNG/
+          windeployqt BandageNG --release --compiler-runtime
+          7z a BandageNG-win-${{steps.commit.outputs.short}}.zip BandageNG -r
+
+      - name: '📤 Upload artifact: ZIP'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BandageNG-win-${{steps.commit.outputs.short}}.zip
+          path: ${{github.workspace}}/build/BandageNG*.zip
 
   # Upload continuous build
   upload:
@@ -144,12 +165,13 @@ jobs:
       needs:
         - build-linux
         - build-mac
+        - build-windows
       runs-on: ubuntu-20.04
       steps:
       - name: '⚙️ Install dependencies'
         run: sudo apt-get install -y libfuse2
       - name: '📥 Download artifacts'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
       - name: '🗂 Inspect directory after downloading artifacts'
         run: ls -alFR
       - name: '🚀 Create release and upload artifacts'
@@ -160,3 +182,4 @@ jobs:
             chmod +x pyuploadtool-x86_64.AppImage
             ./pyuploadtool-x86_64.AppImage **/BandageNG-Linux-*.AppImage
             ./pyuploadtool-x86_64.AppImage **/BandageNG-macOS-*.dmg
+            ./pyuploadtool-x86_64.AppImage **/BandageNG-win-*.zip

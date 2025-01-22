@@ -71,6 +71,8 @@ namespace gfa {
         //information and so we don't save depth.
         if (depthTag == "DP" || depthTag == "dp")
             gfaSegmentLine += "\tDP:f:" + QString::number(node->getDepth()).toLatin1();
+        else if (depthTag == "rd")
+            gfaSegmentLine += "\trd:i:" + QString::number(node->getDepth()-1).toLatin1();
         else if (depthTag == "KC" || depthTag == "RC" || depthTag == "FC")
             gfaSegmentLine += "\t" + depthTag.toLatin1() + ":i:" +
                               QString::number(int(node->getDepth() * gfaSequence.length() + 0.5)).toLatin1();
@@ -173,8 +175,7 @@ namespace gfa {
         }
 
         QList<const DeBruijnEdge *> edgesToSave;
-        for (auto &entry: graph.m_deBruijnGraphEdges) {
-            const DeBruijnEdge *edge = entry.second;
+        for (const DeBruijnEdge *edge : graph.m_deBruijnGraphEdges) {
             if (edge->isPositiveEdge())
                 edgesToSave.push_back(edge);
         }
@@ -203,8 +204,7 @@ namespace gfa {
         }
 
         QList<const DeBruijnEdge *> edgesToSave;
-        for (auto &entry: graph.m_deBruijnGraphEdges) {
-            const DeBruijnEdge *edge = entry.second;
+        for (const DeBruijnEdge *edge : graph.m_deBruijnGraphEdges) {
             if (edge->getStartingNode()->thisNodeOrReverseComplementIsDrawn() &&
                 edge->getEndingNode()->thisNodeOrReverseComplementIsDrawn() &&
                 edge->isPositiveEdge())
